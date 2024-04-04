@@ -23,7 +23,9 @@ setup(
     ],
     install_requires=[
         "numpy",
-        "gymnasium",
+        "pettingzoo",
+        "six",
+        "pyglet",
         "networkx",
         "pyastar2d"
     ],
