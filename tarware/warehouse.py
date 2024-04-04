@@ -1,8 +1,8 @@
 import logging
 
 from collections import defaultdict, OrderedDict
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import pyastar2d
 from tarware.utils import find_sections
 from enum import Enum
@@ -805,7 +805,8 @@ class Warehouse(gym.Env):
                         dispatch_item_map[id_ - len(self.goals) - 1] = 1
         return dispatch_item_map
     
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed, options=options)
         Shelf.counter = 0
         Agent.counter = 0
         self._cur_inactive_steps = 0
@@ -829,14 +830,14 @@ class Warehouse(gym.Env):
             ) if self._is_highway(x, y)])
         
         # Spawn agents on higwahy locations 
-        agent_loc_ids = np.random.choice(
+        agent_loc_ids = self.np_random.choice(
             np.arange(len(self._higway_locs)),
             size=self.n_agents_,
             replace=False,
         )
         agent_locs = [self._higway_locs[agent_loc_ids, 0], self._higway_locs[agent_loc_ids, 1]]
         # and direction
-        agent_dirs = np.random.choice([d for d in Direction], size=self.n_agents_)
+        agent_dirs = self.np_random.choice([d for d in Direction], size=self.n_agents_)
         self.agents = [
             Agent(x, y, dir_, self.msg_bits, agent_type = agent_type)
             for y, x, dir_, agent_type in zip(*agent_locs, agent_dirs, self._agent_types)
@@ -844,11 +845,11 @@ class Warehouse(gym.Env):
         self._recalc_grid()
 
         self.request_queue = list(
-            np.random.choice(self.shelfs, size=self.request_queue_size, replace=False)
+            self.np_random.choice(self.shelfs, size=self.request_queue_size, replace=False)
         )
         self.targets = np.zeros(len(self.agents), dtype=int)
         self.stuck_count = [[0, (agent.x, agent.y)] for agent in self.agents]
-        return tuple([self._make_obs(agent) for agent in self.agents])
+        return tuple([self._make_obs(agent) for agent in self.agents]), {}
 
     def resolve_move_conflict(self, agent_list):
         # # stationary agents will certainly stay where they are
@@ -1099,9 +1100,9 @@ class Warehouse(gym.Env):
             shelf_deliveries += 1
             # remove from queue and replace it
             carried_shels = [agent.carrying_shelf for agent in self.agents if agent.carrying_shelf]
-            new_shelf_candidates = list(set(self.shelfs) - set(self.request_queue) - set(carried_shels)) # sort so np.random with seed is repeatable
+            new_shelf_candidates = list(set(self.shelfs) - set(self.request_queue) - set(carried_shels)) # sort so self.np_random with seed is repeatable
             new_shelf_candidates.sort(key = lambda x: x.id)
-            new_request = np.random.choice(new_shelf_candidates)
+            new_request = self.np_random.choice(new_shelf_candidates)
             self.request_queue[self.request_queue.index(shelf)] = new_request
 
             if self.no_need_return_item:
@@ -1167,8 +1168,3 @@ class Warehouse(gym.Env):
     def close(self):
         if self.renderer:
             self.renderer.close()
-
-    def seed(self, seed=None):
-        np.random.seed(seed)
-        random.seed(seed)
-    

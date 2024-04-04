@@ -1,6 +1,6 @@
 
 from dataclasses import dataclass
-import gym
+import gymnasium as gym
 from tarware.heuristic import heuristic_episode
 from tarware.warehouse import RewardType, Warehouse
 

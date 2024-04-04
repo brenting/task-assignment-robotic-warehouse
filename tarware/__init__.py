@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 from tarware.warehouse import Warehouse, RewardType, Action, ObserationType
 import itertools
 

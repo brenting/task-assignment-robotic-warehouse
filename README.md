@@ -86,14 +86,14 @@ RWARE was designed to be compatible with Open AI's Gym framework.
 Creating the environment is done exactly as one would create a Gym environment:
 
 ```python
-import gym
+import gymnasium as gym
 import tarware
 env = gym.make("tarware-tiny-3agvs-2pickers-ag-easy-v1")
 ```
 
 You can even bypass the `import` statement with Gym, and directly use:
 ```python
-import gym
+import gymnasium as gym
 env = gym.make("tarware-tiny-3agvs-2pickers-ag-easy-v1")
 ```
 The `rware:` in the beginning of the environment name tells Gym to import the respective package.

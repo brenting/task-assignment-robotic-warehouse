@@ -10,7 +10,7 @@ import sys
 import numpy as np
 import math
 import six
-from gym import error
+from gymnasium import error
 from tarware.warehouse import Direction, AgentType
 
 if "Apple" in sys.version:
