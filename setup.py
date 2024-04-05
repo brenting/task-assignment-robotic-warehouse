@@ -25,7 +25,7 @@ setup(
         "numpy",
         "pettingzoo",
         "six",
-        "pyglet",
+        "pyglet==1.5",
         "networkx",
         "pyastar2d"
     ],

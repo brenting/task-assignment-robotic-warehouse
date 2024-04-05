@@ -246,7 +246,7 @@ class Viewer(object):
 
         radius = self.grid_size / 3
 
-        for agent in env.agents:
+        for agent in env.agents_list:
 
             col, row = agent.x, agent.y
             row = self.rows - row - 1  # pyglet rendering is reversed
@@ -284,7 +284,7 @@ class Viewer(object):
             glColor3ub(*draw_color)
             circle.draw(GL_POLYGON)
 
-        for agent in env.agents:
+        for agent in env.agents_list:
 
             col, row = agent.x, agent.y
             row = self.rows - row - 1  # pyglet rendering is reversed
