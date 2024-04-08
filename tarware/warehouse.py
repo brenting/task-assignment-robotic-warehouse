@@ -1,7 +1,7 @@
 import functools
 from collections import OrderedDict
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import networkx as nx
 import numpy as np
@@ -971,8 +971,8 @@ class Warehouse(ParallelEnv):
             agent.req_action = Action.NOOP
         return clashes
     def step(
-        self, macro_actions: dict[Action]
-    ) -> Tuple[List[np.ndarray], List[float], List[bool], Dict]:
+        self, macro_actions: dict[str, Action]
+    ) -> tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]:
         # Logic for Macro Actions
         for agent_id, macro_action in macro_actions.items():
             agent = self.agents_list[self.agent_name_mapping[agent_id]]
@@ -1199,7 +1199,7 @@ class Warehouse(ParallelEnv):
         rewards = list(rewards)
         reward = {agent_id: rewards[i] for agent_id, i in self.agent_name_mapping.items()}
 
-        return new_obs,reward, terminated, truncated, info
+        return new_obs, reward, terminated, truncated, info
 
     def render(self, mode="human"):
         if not self.renderer:

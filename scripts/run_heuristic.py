@@ -47,12 +47,23 @@ def info_statistics(infos, global_episode_return, episode_returns):
     return last_info
 
 if __name__ == "__main__":
-    env = gym.make("tarware-tiny-3agvs-2pickers-ag-easy-v1")
+    env = Warehouse(
+        column_height=8,
+        shelf_rows=1,
+        shelf_columns=3,
+        n_agvs=3,
+        n_pickers=2,
+        msg_bits=0,
+        sensor_range=1,
+        request_queue_size=6,
+        max_inactivity_steps=None,
+        max_steps=500,
+        reward_type=RewardType.INDIVIDUAL,
+    )
     seed = args.seed
-    env.seed(seed)
     completed_episodes = 0
     for _ in range(args.num_episodes):
-        infos, global_episode_return, episode_returns = heuristic_episode(env.unwrapped, args.render)
+        infos, global_episode_return, episode_returns = heuristic_episode(env.unwrapped, args.render, seed)
         last_info = info_statistics(infos, global_episode_return, episode_returns)
         last_info["overall_pick_rate"] = last_info.get("total_deliveries") * 3600 / (5 * last_info['episode_length'])
         print(f"Completed Episode {completed_episodes}: | [Overall Pick Rate={last_info.get('overall_pick_rate'):.2f}]| [Global return={last_info.get('global_episode_return'):.2f}]| [Total shelf deliveries={last_info.get('total_deliveries'):.2f}]| [Total clashes={last_info.get('total_clashes'):.2f}]| [Total stuck={last_info.get('total_stuck'):.2f}]")

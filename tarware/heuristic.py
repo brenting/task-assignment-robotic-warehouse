@@ -6,6 +6,7 @@ from enum import Enum
 
 import numpy as np
 from tarware.warehouse import Agent, AgentType
+from tarware.warehouse import Warehouse
 from tarware.utils.utils import flatten_list, split_list
 
 class MissionType(Enum):
@@ -23,7 +24,7 @@ class Mission:
     at_location: bool = False
     
 
-def heuristic_episode(env, render=False):
+def heuristic_episode(env: Warehouse, render=False, seed=0):
     # non_goal_location_ids corresponds to the item ordering in `get_empty_shelf_information`
     non_goal_location_ids = []
     for id_, coords in env.item_loc_dict.items():
@@ -31,12 +32,12 @@ def heuristic_episode(env, render=False):
             non_goal_location_ids.append(id_)
     non_goal_location_ids = np.array(non_goal_location_ids)
     location_map =  env.item_loc_dict 
-    _ = env.reset()
+    _ = env.reset(seed=seed)
     done = False
     all_infos = []
     timestep = 0
 
-    agents = env.agents
+    agents = env.agents_list
     agvs = [a for a in agents if a.type == AgentType.AGV]
     pickers = [a for a in agents if a.type == AgentType.PICKER]
     coords_original_loc_map = {v:k for k, v in env.item_loc_dict.items()}
@@ -136,10 +137,17 @@ def heuristic_episode(env, render=False):
         # macro_action should be the index of self.item_loc_dict
         if render:
             env.render("human")
-        observation, reward, done, info = env.step(list(actions.values()))
+        actions_pz = {f"{agent.type.name}_{agent.id}": actions[agent] for agent in agents}
+        _, reward_pz, terminated_pz, _, info = env.step(actions_pz)
+
+        # conversion from pettingzoo to original format
+        reward = [reward_pz[f"{agent.type.name}_{agent.id}"] for agent in agents]
+        terminated = [terminated_pz[f"{agent.type.name}_{agent.id}"] for agent in agents]
+        # info = [info_pz[f"{agent.type.name}_{agent.id}"] for agent in agents]
+
         episode_returns += np.array(reward, dtype=np.float64)
         global_episode_return += np.sum(reward)
-        done = all(done)
+        done = all(terminated)
         all_infos.append(info)
         timestep += 1
     
