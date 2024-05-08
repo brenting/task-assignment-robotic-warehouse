@@ -1,5 +1,5 @@
 import gymnasium as gym
-from tarware.warehouse import Warehouse, RewardType, Action, ObserationType
+from tarware.warehouse import Warehouse, RewardType, Action, ObserationType, RepeatedWarehouse
 import itertools
 
 _sizes = {
