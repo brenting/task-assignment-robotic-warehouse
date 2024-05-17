@@ -1,5 +1,5 @@
 import functools
-from collections import OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 from enum import IntEnum
 from typing import Any
 
@@ -113,6 +113,7 @@ class Agent(Entity):
         self.carrying_shelf: Shelf | None = None
         self.canceled_action = None
         self.has_delivered = False
+        self.to_deliver = False
         self.path = None
         self.busy = False
         self.fixing_clash = 0
@@ -186,6 +187,8 @@ class Warehouse(ParallelEnv):
         action_masking: bool=False,
         sample_collection: str="all",
         targets_vam: bool=True,
+        no_observations: bool=False,
+        improved_masking: bool = True,
     ):
         """The robotic warehouse environment
 
@@ -256,6 +259,9 @@ class Warehouse(ParallelEnv):
         self.action_masking = action_masking
         self.sample_collection = sample_collection
         self.targets_vam = targets_vam
+
+        self.no_observations = no_observations
+        self.improved_masking = improved_masking
 
 
         self.goals: list[tuple[int, int]] = []
@@ -332,7 +338,10 @@ class Warehouse(ParallelEnv):
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
         # gymnasium spaces are defined and documented here: https://gymnasium.farama.org/api/spaces/
-        obs_space = {"observation": self.sa_observation_space}
+        if self.no_observations:
+            obs_space = {"observation": spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)}
+        else:
+            obs_space = {"observation": self.sa_observation_space}
         if self.action_masking:
             obs_space["action_mask"] = spaces.Box(0, 1, (self.sa_action_space.n,), dtype=bool)
         if self.sample_collection == "masking":
@@ -510,11 +519,19 @@ class Warehouse(ParallelEnv):
 
     def _is_highway(self, x: int, y: int) -> bool:
         return self.highways[y, x]
+    
+    def get_observations(self):
+        self.set_observation_requirements()
+        if self.sample_collection == "relevant":
+            observations = {f"{agent.type.name}_{agent.id}": self.get_agent_observation(agent) for agent in self.agents_list if not agent.busy}
+        else:
+            observations = {f"{agent.type.name}_{agent.id}": self.get_agent_observation(agent) for agent in self.agents_list}
+        return observations
 
-    def get_obs(self, agent):
-        if  self.sample_collection == "relevant" and agent.busy:
-            return None
-        if self.observation_type == ObserationType.IMAGE:
+    def get_agent_observation(self, agent):
+        if self.no_observations:
+            obs = np.array([agent.carrying_shelf is not None, agent.to_deliver], dtype=np.float32)
+        elif self.observation_type == ObserationType.IMAGE:
             obs = self.get_image_obs(agent)
         elif self.observation_type == ObserationType.DICT:
             obs = self.get_dict_obs(agent)
@@ -854,20 +871,35 @@ class Warehouse(ParallelEnv):
 
     def get_agv_action_mask(self, agent: Agent):
         agent_is_carrying = (agent.carrying_shelf is not None)
+        agent_to_return = agent_is_carrying and not agent.to_deliver
 
         noop_mask = [True]
-        goal_mask = [agent_is_carrying] * len(self.goals)
-        item_mask = [(empty if agent_is_carrying else requested) and (i not in self.agv_targets) for i, (empty, requested) in enumerate(zip(self.empty_items_list, self.requested_items_list))]
+
+        if self.improved_masking:
+            goal_mask = [agent.to_deliver] * len(self.goals)
+            if agent.to_deliver:
+                item_mask = [False] * len(self.requested_items_list)
+            elif agent_to_return:
+                item_mask = [empty and (i not in self.agv_targets) for i, empty in enumerate(self.empty_items_list)]
+            else:
+                item_mask = [requested and (i not in self.agv_targets) for i, requested in enumerate(self.requested_items_list)]
+        else:
+            goal_mask = [agent_is_carrying] * len(self.goals)
+            item_mask = [(empty if agent_is_carrying else requested) and (i not in self.agv_targets) for i, (empty, requested) in enumerate(zip(self.empty_items_list, self.requested_items_list))]
 
         return np.array(noop_mask + goal_mask + item_mask, dtype=bool)
 
-    
     def reset(self, seed=None, options=None):
         if not hasattr(self, "np_random"):
             self.np_random = default_rng(seed) if seed else default_rng(0)
         self.agents = self.possible_agents
 
-        self.episodic_return = {agent_id: 0 for agent_id in self.agent_name_mapping.keys()}
+        # self.episodic_return = Counter({agent_id: 0 for agent_id in self.agent_name_mapping.keys()})
+        # self.aggregated_reward = {agent_id: 0 for agent_id in self.agent_name_mapping.keys()}
+        # self.episode_stats = defaultdict(0)
+        self.episodic_return = Counter()
+        self.aggregated_reward = Counter()
+        self.episode_stats = Counter()
 
         Shelf.counter = 0
         Agent.counter = 0
@@ -912,10 +944,9 @@ class Warehouse(ParallelEnv):
         self.targets = np.zeros(len(self.agents_list), dtype=int)
         self.stuck_count = [[0, (agent.x, agent.y)] for agent in self.agents_list]
 
-        self.set_observation_requirements()
-        obs = {f"{agent.type.name}_{agent.id}": self.get_obs(agent) for agent in self.agents_list}
-        infos = {f"{agent.type.name}_{agent.id}": {} for agent in self.agents_list}
-        return obs, infos
+        observations = self.get_observations()
+        infos = {f"{agent.type.name}_{agent.id}": {"busy": agent.busy} for agent in self.agents_list}
+        return observations, infos
 
     def resolve_move_conflict(self, agent_list):
         # # stationary agents will certainly stay where they are
@@ -1009,7 +1040,9 @@ class Warehouse(ParallelEnv):
         self, macro_actions: dict[str, Action]
     ) -> tuple[dict[str, Any], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]:
         # Logic for Macro Actions
-        for agent_id, macro_action in macro_actions.items():
+        for agent_id in self.agents:
+            #NOTE: hacky way to select noop if action not present, needs something better
+            macro_action = macro_actions.get(agent_id, 0)
             agent = self.agents_list[self.agent_name_mapping[agent_id]]
             # Initialize action for step
             agent.req_action = Action.NOOP
@@ -1092,7 +1125,7 @@ class Warehouse(ParallelEnv):
                             agent.req_action = Action.NOOP
                             agent.busy = False
 
-        rewards = np.zeros(self.n_agents)
+        rewards = np.zeros(self.n_agents, dtype=np.float32)
         # Add step penalty
         rewards -= 0.001
         for agent in self.agents_list:
@@ -1114,6 +1147,7 @@ class Warehouse(ParallelEnv):
                             self.grid[_LAYER_SHELFS, agent.y, agent.x] = 0
                             self.grid[_LAYER_CARRIED_SHELFS, agent.y, agent.x] = shelf_id
                             agent.busy = False
+                            agent.to_deliver = True
                             # Reward Pickers for loading shelf
                             if self.reward_type == RewardType.GLOBAL:
                                 rewards += 0.5
@@ -1128,6 +1162,7 @@ class Warehouse(ParallelEnv):
                 picker_id = self.grid[_LAYER_PICKERS, agent.y, agent.x]
                 if (agent.x, agent.y) in self.goals:
                     agent.busy = False
+                    agent.to_deliver = False
                     continue
                 if self.grid[_LAYER_SHELFS, agent.y, agent.x] != 0:
                     agent.busy = False
@@ -1206,37 +1241,19 @@ class Warehouse(ParallelEnv):
             self.max_inactivity_steps
             and self._cur_inactive_steps >= self.max_inactivity_steps
         ) or (self.max_steps and self._cur_steps >= self.max_steps):
-            # dones = self.n_agents * [True]
-            terminated = {a: True for a in self.agents}
-            truncated = {a: True for a in self.agents}
-            done = True
+            episode_done = True
         else:
-            # dones = self.n_agents * [False]
-            terminated = {a: False for a in self.agents}
-            truncated = {a: False for a in self.agents}
-            done = False
+            episode_done = False
 
         
         agvs_idle_time = sum([int(agent.req_action in (Action.NOOP, Action.TOGGLE_LOAD)) for agent in self.agents_list[:self.n_agvs]])
         pickers_idle_time = sum([int(agent.req_action in (Action.NOOP, Action.TOGGLE_LOAD)) for agent in self.agents_list[self.n_agvs:]])
-        # new_obs = tuple([self.get_obs(agent) for agent in self.agents_list])
 
-
-        self.set_observation_requirements()
-        new_obs = {f"{agent.type.name}_{agent.id}": self.get_obs(agent) for agent in self.agents_list}
-
-        rewards = list(rewards)
-        reward = {agent_id: rewards[i] for agent_id, i in self.agent_name_mapping.items()}
-
-        # self.reward_aggregated
-        
-        self.episodic_return = {agent_id: self.episodic_return[agent_id] + reward[agent_id] for agent_id in self.agent_name_mapping.keys()}
-
-        infos = {f"{agent.type.name}_{agent.id}": {"busy": agent.busy} for agent in self.agents_list}
-        if done:
-            [info.update({"episode": {"return": self.episodic_return[agent_id], "length": self._cur_steps}}) for agent_id, info in infos.items()]
-
-        infos["__common__"] = {
+        # sum counters
+        step_rewards = {agent_id: rewards[i] for agent_id, i in self.agent_name_mapping.items()}
+        self.aggregated_reward.update(step_rewards)
+        self.episodic_return.update(step_rewards)
+        self.episode_stats.update({
             "shelf_deliveries": shelf_deliveries,
             "clashes": clashes_count,
             "stucks": stucks_count,
@@ -1244,10 +1261,44 @@ class Warehouse(ParallelEnv):
             "pickers_distance_travelled": pickers_distance_travelled,
             "agvs_idle_time": agvs_idle_time,
             "pickers_idle_time": pickers_idle_time,
-        }
-        # infos[f"{self.agents_list[0].type.name}_{self.agents_list[0].id}"].update({"__common__": common_info})
+        })
+    
+        # Construct return values
+        observations = self.get_observations()
 
-        return new_obs, reward, terminated, truncated, infos
+        if self.sample_collection == "relevant":
+            returning_agents = list(observations.keys())
+            rewards = {agent_id: self.aggregated_reward[agent_id] for agent_id in returning_agents}
+            for agent_id in returning_agents:
+                self.aggregated_reward[agent_id] = np.float32(0)
+        else:
+            returning_agents = self.agents
+            rewards = step_rewards
+
+        terminateds = {agent_id: episode_done for agent_id in returning_agents}
+        truncateds = {agent_id: episode_done for agent_id in returning_agents}
+        infos = {f"{agent.type.name}_{agent.id}": {"busy": agent.busy} for agent in self.agents_list}
+        infos["__step_common__"] = {
+            "shelf_deliveries": shelf_deliveries,
+            "clashes": clashes_count,
+            "stucks": stucks_count,
+            "agvs_distance_travelled": agvs_distance_travelled,
+            "pickers_distance_travelled": pickers_distance_travelled,
+            "agvs_idle_time": agvs_idle_time,
+            "pickers_idle_time": pickers_idle_time
+        }
+
+        if episode_done:
+            for agent_id in self.agents:
+                infos[agent_id]["episode"] = {"return": self.episodic_return[agent_id], "length": self._cur_steps}
+            infos["__common__"] = self.episode_stats
+            pickrate = self.episode_stats["shelf_deliveries"] * 3600 / (5 * self._cur_steps)
+            infos["__common__"]["pickrate"] = pickrate
+            terminateds = truncateds = {agent_id: True for agent_id in self.agents}
+        else:
+            terminateds = truncateds = {agent_id: False for agent_id in returning_agents}
+
+        return observations, rewards, terminateds, truncateds, infos
 
     def render(self, mode="human"):
         if not self.renderer:
@@ -1266,7 +1317,7 @@ class RepeatedWarehouse(Warehouse):
 
         observations, rewards, terms, truncs, infos = super().step(macro_actions)
 
-        env_done = all([truncs[agent_id] or term for agent_id, term in terms.items()])
+        env_done = all([terms.get(agent_id, False) for agent_id in self.agents])
 
         if env_done:
             observations, reset_infs = self.reset()
