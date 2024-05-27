@@ -1,5 +1,5 @@
 import gymnasium as gym
-from tarware.warehouse import Warehouse, RewardType, Action, ObserationType, RepeatedWarehouse
+from tarware.warehouse import Warehouse, RewardType, Action, RepeatedWarehouse
 import itertools
 
 _sizes = {
@@ -34,7 +34,7 @@ for size, diff, n_agvs, n_pickers in _perms:
     )
 
 def full_registration():
-    _observation_type = {"": ObserationType.FLATTENED}
+    _observation_type = {"": "flattened"}
     _sensor_ranges = {f"-{sight}s": sight for sight in range(2, 6)}
     _sensor_ranges[""] = 1
     _image_directional = {"": True, "-Nd": False}
