@@ -72,12 +72,6 @@ class RewardType(IntEnum):
     INDIVIDUAL = 1
     TWO_STAGE = 2
 
-
-class ObserationType(IntEnum):
-    DICT = 0
-    FLATTENED = 1
-    IMAGE = 2
-
 class ImageLayer(IntEnum):
     """
     Input layers of image-style observations
@@ -181,14 +175,14 @@ class Warehouse(ParallelEnv):
         max_steps: int | None,
         reward_type: RewardType,
         layout: str | None = None,
-        observation_type: ObserationType=ObserationType.FLATTENED,
-        normalised_coordinates: bool=False,
-        render_mode: str | None=None,
-        action_masking: bool=False,
-        sample_collection: str="all",
-        targets_vam: bool=True,
-        no_observations: bool=False,
+        observation_type: str = "flattened",
+        normalised_coordinates: bool = False,
+        render_mode: str | None = None,
+        action_masking: bool = False,
+        sample_collection: str = "all",
+        targets_vam: bool = True,
         improved_masking: bool = True,
+        agents_can_clash: bool = True,
     ):
         """The robotic warehouse environment
 
@@ -260,8 +254,9 @@ class Warehouse(ParallelEnv):
         self.sample_collection = sample_collection
         self.targets_vam = targets_vam
 
-        self.no_observations = no_observations
+        self.observation_type = observation_type
         self.improved_masking = improved_masking
+        self.agents_can_clash = agents_can_clash
 
 
         self.goals: list[tuple[int, int]] = []
@@ -274,6 +269,8 @@ class Warehouse(ParallelEnv):
             self._make_layout_from_params(shelf_columns, shelf_rows, column_height)
         else:
             self._make_layout_from_str(layout)
+        
+
         if n_pickers > 0:
             self._agent_types = [AgentType.AGV for _ in range(n_agvs)] + [AgentType.PICKER for _ in range(n_pickers)]
         else:
@@ -300,10 +297,6 @@ class Warehouse(ParallelEnv):
         
         self.normalised_coordinates = normalised_coordinates
 
-        if msg_bits == 0:
-            self.sa_action_space = spaces.Discrete(len(self.item_loc_dict) + 1)
-        else:
-            self.sa_action_space = spaces.MultiDiscrete([len(self.item_loc_dict) + 1] + [2] * msg_bits)
 
         self.request_queue_size = request_queue_size
         self.request_queue = []
@@ -314,21 +307,7 @@ class Warehouse(ParallelEnv):
         self.stuck_count = []
         self._stuck_threshold = 5
         # default values:
-        self.fast_obs = None
-        self.image_obs = None
         self.rack_groups = find_sections(list([loc for loc in self.item_loc_dict.values() if (loc[1], loc[0]) not in self.goals]))
-
-
-        # for performance reasons we
-        # can flatten the obs vector
-        assert observation_type in iter(ObserationType), "Observation type not recognized"
-        self.observation_type = observation_type
-        if observation_type == ObserationType.FLATTENED:
-            self.sa_observation_space = self.get_fast_obs_space()
-        elif observation_type == ObserationType.DICT:
-            self.sa_observation_space = self.get_dict_obs_space()
-        elif observation_type == ObserationType.IMAGE:
-            raise NotImplementedError("Observation space for image observation not defined")
 
         self.renderer = None
 
@@ -338,12 +317,26 @@ class Warehouse(ParallelEnv):
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
         # gymnasium spaces are defined and documented here: https://gymnasium.farama.org/api/spaces/
-        if self.no_observations:
-            obs_space = {"observation": spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)}
+        # for performance reasons we
+        # can flatten the obs vector
+        if self.observation_type == "flattened":
+            sa_observation_space = self.get_flattened_obs_space(agent)
+        elif self.observation_type == "status":
+            sa_observation_space = spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)
+        elif self.observation_type == "identifier":
+            agent_type = agent.split("_")[0]
+            if agent_type == "AGV":
+                sa_observation_space = spaces.Box(low=0, high=1, shape=(2 + self.n_agvs,), dtype=np.float32)
+            elif agent_type == "PICKER":
+                sa_observation_space = spaces.Box(low=0, high=1, shape=(2 + self.n_pickers,), dtype=np.float32)
+        elif self.observation_type == "none":
+            sa_observation_space = spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)
         else:
-            obs_space = {"observation": self.sa_observation_space}
+            raise NotImplementedError(f"Observation space for {self.observation_type} type not defined")
+
+        obs_space = {"observation": sa_observation_space}
         if self.action_masking:
-            obs_space["action_mask"] = spaces.Box(0, 1, (self.sa_action_space.n,), dtype=bool)
+            obs_space["action_mask"] = spaces.Box(0, 1, (self.action_space(agent).n,), dtype=bool)
         if self.sample_collection == "masking":
             obs_space["sample_mask"] = spaces.Box(0, 1, (1,), dtype=bool)
         return spaces.Dict(obs_space)
@@ -351,9 +344,14 @@ class Warehouse(ParallelEnv):
     # Action space should be defined here.
     # If your spaces change over time, remove this line (disable caching).
     @functools.lru_cache(maxsize=None)
-    def action_space(self, agent):
-        return self.sa_action_space
-
+    def action_space(self, agent) -> spaces.Discrete:
+        agent_type = agent.split("_")[0]
+        if agent_type == "AGV":
+            action_space = spaces.Discrete(1 + len(self.item_loc_dict))
+        elif agent_type == "PICKER":
+            action_space = spaces.Discrete(1 + len(self.item_loc_dict) - len(self.goals))
+        return action_space
+        
     def _make_layout_from_params(self, shelf_columns, shelf_rows, column_height):
         assert shelf_columns % 2 == 1, "Only odd number of shelf columns is supported"
         self.extra_rows = 2
@@ -445,77 +443,30 @@ class Warehouse(ParallelEnv):
 
         assert len(self.goals) >= 1, "At least one goal is required"
 
-    def get_dict_obs_space(self):
-        self.fast_obs = False
+    def get_flattened_obs_space(self, agent: str) -> spaces.Box:
+        agent_type = agent.split("_")[0]
+        if agent_type == "AGV":
+            obs_len_agent_id = self.n_agvs
+        elif agent_type == "PICKER":
+            obs_len_agent_id = self.n_pickers
 
-        location_space = spaces.Box(low=0.0, high=max(self.grid_size), shape=(2,), dtype=np.float32)
-        agent_id_space = spaces.Box(low=0.0, high=self.n_agents, shape=(1,), dtype=np.float32)
+        # obs_len_agent_id=1
 
-        self._obs_sensor_locations = len(self.item_loc_dict) - len(self.goals) #self.grid_size[0] * self.grid_size[1]
+        obs_len_location = 2
+        obs_len_per_agvs = 4 + 2 * obs_len_location
+        obs_len_per_pickers = 2 * obs_len_location
+        obs_len_per_shelf = 2
 
+        n_shelves = len(self.item_loc_dict) - len(self.goals)
 
-        obs = {}
-        for agent_id in range(self.n_agvs):
-            obs[f"agent{agent_id+1}"] = spaces.Dict(OrderedDict(
-                {
-                    "agent_id": agent_id_space,
-                    "carrying_shelf": spaces.MultiBinary(1),
-                    "shelf_requested": spaces.MultiBinary(1),
-                    "loading_state": spaces.MultiBinary(1),
-                    "location": location_space,
-                    "target_location": location_space,
-                }
-            ))
-        for agent_id in range(self.n_pickers):
-            obs[f"agent{self.n_agvs + agent_id+1}"] = spaces.Dict(OrderedDict(
-                {
-                    "agent_id": agent_id_space,
-                    "location": location_space,
-                    "target_location": location_space,
-                }
-            ))
-                
-        individual_location_obs = spaces.Dict(OrderedDict(
-            {
-                "has_shelf": spaces.MultiBinary(1),
-                "shelf_requested": spaces.MultiBinary(1),
-                # "has_carried_shelf": spaces.MultiBinary(1),
-            }
-        ))
-        obs["sensors"] = spaces.Tuple(self._obs_sensor_locations * (individual_location_obs,))
-        return spaces.Dict(obs)
-
-    def get_fast_obs_space(self) -> spaces.Box:
-        if self.fast_obs:
-            return
-
-        self.fast_obs = True
-
-
-        location_space = spaces.Box(low=0.0, high=max(self.grid_size), shape=(2,), dtype=np.float32)
-        agent_id_space = spaces.Box(low=0.0, high=self.n_agents, shape=(1,), dtype=np.float32)
-        self._obs_bits_for_agvs = spaces.flatdim(agent_id_space) + 3  + spaces.flatdim(location_space)  + spaces.flatdim(location_space)
-        self._obs_bits_for_pickers = spaces.flatdim(agent_id_space) + spaces.flatdim(location_space)  + spaces.flatdim(location_space)
-        self._obs_bits_per_shelf = 1 #+ 1
-        self._obs_bits_for_requests = 1
-        self._obs_sensor_locations = len(self.item_loc_dict) - len(self.goals) #self.grid_size[0] * self.grid_size[1]
-
-
-        self._obs_length = (
-            self._obs_bits_for_agvs * self.n_agvs
-            + self._obs_bits_for_pickers * self.n_pickers
-            + self._obs_sensor_locations * (self._obs_bits_per_shelf
-            + self._obs_bits_for_requests)
+        obs_len = (
+            obs_len_agent_id
+            + obs_len_per_agvs * self.n_agvs
+            + obs_len_per_pickers * self.n_pickers
+            + obs_len_per_shelf * n_shelves
         )
 
-        obs = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(self._obs_length,),
-            dtype=np.float32,
-        )
-
-        return obs
+        return spaces.Box(low=-np.inf, high=np.inf, shape=(obs_len,), dtype=np.float32)
 
     def _is_highway(self, x: int, y: int) -> bool:
         return self.highways[y, x]
@@ -528,15 +479,23 @@ class Warehouse(ParallelEnv):
             observations = {f"{agent.type.name}_{agent.id}": self.get_agent_observation(agent) for agent in self.agents_list}
         return observations
 
-    def get_agent_observation(self, agent):
-        if self.no_observations:
+    def get_agent_observation(self, agent: Agent):
+        if self.observation_type == "flattened":
+            obs = self.get_flattened_obs(agent)
+        elif self.observation_type == "none":
+            obs = np.array([0, 0], dtype=np.float32)
+        elif self.observation_type == "status":
             obs = np.array([agent.carrying_shelf is not None, agent.to_deliver], dtype=np.float32)
-        elif self.observation_type == ObserationType.IMAGE:
-            obs = self.get_image_obs(agent)
-        elif self.observation_type == ObserationType.DICT:
-            obs = self.get_dict_obs(agent)
-        elif self.observation_type == ObserationType.FLATTENED:
-            obs = self.get_fast_obs(agent)
+        elif self.observation_type == "identifier":
+            status_obs = [agent.carrying_shelf is not None, agent.to_deliver]
+            if agent.type == AgentType.AGV:
+                id_obs = [0] * self.n_agvs
+                agent_id = agent.id
+            elif agent.type == AgentType.PICKER:
+                id_obs = [0] * self.n_pickers
+                agent_id = agent.id - self.n_agvs
+            id_obs[agent_id - 1] = 1
+            obs = np.array(status_obs + id_obs, dtype=np.float32)
 
         obs = {"observation": obs}
         if self.sample_collection == "masking":
@@ -546,101 +505,26 @@ class Warehouse(ParallelEnv):
 
         return obs
 
-    def get_image_obs(self, agent):
-        # write image observations
-        if agent.id == 1:
-            layers = []
-            # first agent's observation --> update global observation layers
-            for layer_type in self.image_observation_layers:
-                if layer_type == ImageLayer.SHELVES:
-                    layer = self.grid[_LAYER_SHELFS].copy().astype(np.float32)
-                    # set all occupied shelf cells to 1.0 (instead of shelf ID)
-                    layer[layer > 0.0] = 1.0
-                    # print("SHELVES LAYER")
-                elif layer_type == ImageLayer.REQUESTS:
-                    layer = np.zeros(self.grid_size, dtype=np.float32)
-                    for requested_shelf in self.request_queue:
-                        layer[requested_shelf.y, requested_shelf.x] = 1.0
-                    # print("REQUESTS LAYER")
-                elif layer_type == ImageLayer.AGENTS:
-                    layer = self.grid[_LAYER_AGENTS].copy().astype(np.float32)
-                    # set all occupied agent cells to 1.0 (instead of agent ID)
-                    layer[layer > 0.0] = 1.0
-                    # print("AGENTS LAYER")
-                elif layer_type == ImageLayer.AGENT_DIRECTION:
-                    layer = np.zeros(self.grid_size, dtype=np.float32)
-                    for ag in self.agents_list:
-                        if ag.can_carry:
-                            agent_direction = ag.dir.value + 1
-                            layer[ag.x, ag.y] = float(agent_direction)
-                elif layer_type == ImageLayer.PICKERS:
-                    layer = self.grid[_LAYER_PICKERS].copy().astype(np.float32)
-                    # set all occupied agent cells to 1.0 (instead of agent ID)
-                    layer[layer > 0.0] = 1.0
-                    # print("AGENTS LAYER")
-                elif layer_type == ImageLayer.PICKERS_DIRECTION:
-                    layer = np.zeros(self.grid_size, dtype=np.float32)
-                    for ag in self.agents_list:
-                        if ag.can_load and not ag.can_carry:
-                            agent_direction = ag.dir.value + 1
-                            layer[ag.x, ag.y] = float(agent_direction)
-                    # print("AGENT DIRECTIONS LAYER")
-                elif layer_type == ImageLayer.AGENT_LOAD:
-                    layer = np.zeros(self.grid_size, dtype=np.float32)
-                    for ag in self.agents_list:
-                        if ag.carrying_shelf is not None:
-                            layer[ag.x, ag.y] = 1.0
-                    # print("AGENT LOAD LAYER")
-                elif layer_type == ImageLayer.GOALS:
-                    layer = np.zeros(self.grid_size, dtype=np.float32)
-                    for goal_y, goal_x in self.goals:
-                        layer[goal_x, goal_y] = 1.0
-                    # print("GOALS LAYER")
-                elif layer_type == ImageLayer.ACCESSIBLE:
-                    layer = np.ones(self.grid_size, dtype=np.float32)
-                    for ag in self.agents_list:
-                        layer[ag.y, ag.x] = 0.0
-                    # print("ACCESSIBLE LAYER")
-                # print(layer)
-                # print()
-                # pad with 0s for out-of-map cells
-                layer = np.pad(layer, self.sensor_range, mode="constant")
-                layers.append(layer)
-            self.global_layers = np.stack(layers)
-
-        # global information was generated --> get information for agent
-        start_x = agent.y
-        end_x = agent.y + 2 * self.sensor_range + 1
-        start_y = agent.x
-        end_y = agent.x + 2 * self.sensor_range + 1
-        obs = self.global_layers[:, start_x:end_x, start_y:end_y]
-
-        if self.image_observation_directional:
-            # rotate image to be in direction of agent
-            if agent.dir == Direction.DOWN:
-                # rotate by 180 degrees (clockwise)
-                obs = np.rot90(obs, k=2, axes=(1,2))
-            elif agent.dir == Direction.LEFT:
-                # rotate by 90 degrees (clockwise)
-                obs = np.rot90(obs, k=3, axes=(1,2))
-            elif agent.dir == Direction.RIGHT:
-                # rotate by 270 degrees (clockwise)
-                obs = np.rot90(obs, k=1, axes=(1,2))
-            # no rotation needed for UP direction
-        return obs
-
-    def get_fast_obs(self, agent: Agent):
+    def get_flattened_obs(self, agent: Agent):
         # write flattened observations
         obs = []
 
         # Agent self observation
-        obs.append(agent.id)
         if agent.type == AgentType.AGV:
-            if agent.carrying_shelf:
-                obs.extend([1, int(agent.carrying_shelf in self.request_queue)])
+            id_obs = [0] * self.n_agvs
+            agent_id = agent.id
+            if agent.carrying_shelf is not None:
+                obs.extend([1, int(agent.carrying_shelf in self.request_queue), agent.to_deliver])
             else:
-                obs.extend([0, 0])
+                obs.extend([0, 0, agent.to_deliver])
             obs.append(agent.req_action == Action.TOGGLE_LOAD)
+        elif agent.type == AgentType.PICKER:
+            id_obs = [0] * self.n_pickers
+            agent_id = agent.id - self.n_agvs
+        id_obs[agent_id - 1] = 1
+        obs.extend(id_obs)
+        # obs.append(agent.id)
+
         obs.extend([agent.y, agent.x])
         if self.targets[agent.id - 1] != 0:
             obs.extend(self.item_loc_dict[self.targets[agent.id - 1]])
@@ -650,12 +534,11 @@ class Warehouse(ParallelEnv):
         for i in range(self.n_agents):
             agent_ = self.agents_list[i]
             if agent_.id != agent.id:
-                obs.append(agent_.id)
                 if agent_.type == AgentType.AGV:
                     if agent_.carrying_shelf:
-                        obs.extend([1, int(agent_.carrying_shelf in self.request_queue)])
+                        obs.extend([1, int(agent_.carrying_shelf in self.request_queue), agent_.to_deliver])
                     else:
-                        obs.extend([0, 0])
+                        obs.extend([0, 0, agent_.to_deliver])
                     obs.append(agent_.req_action == Action.TOGGLE_LOAD)
                 obs.extend([agent_.y, agent_.x])
                 if self.targets[agent_.id - 1] != 0:
@@ -678,94 +561,6 @@ class Warehouse(ParallelEnv):
                 # else:
                 #     obs.write([1.0])
         return np.array(obs, dtype=np.float32)
-        
-    def get_dict_obs(self, agent):
-        min_x = 0
-        max_x = self.grid_size[1]
-        min_y = 0
-        max_y = self.grid_size[0]
-
-        # sensors
-        if (
-            (min_x < 0)
-            or (min_y < 0)
-            or (max_x > self.grid_size[1])
-            or (max_y > self.grid_size[0])
-        ):
-            padded_agents = np.pad(
-                self.grid[_LAYER_AGENTS], self.sensor_range, mode="constant"
-            )
-            padded_pickers = np.pad(
-                self.grid[_LAYER_PICKERS], self.sensor_range, mode="constant"
-            )
-            padded_shelfs = np.pad(
-                self.grid[_LAYER_SHELFS], self.sensor_range, mode="constant"
-            )
-            # + self.sensor_range due to padding
-            min_x += self.sensor_range
-            max_x += self.sensor_range
-            min_y += self.sensor_range
-            max_y += self.sensor_range
-
-        else:
-            padded_agents = self.grid[_LAYER_AGENTS]
-            padded_shelfs = self.grid[_LAYER_SHELFS]
-            padded_pickers = self.grid[_LAYER_PICKERS]
-
-        agents = padded_agents[min_y:max_y, min_x:max_x].reshape(-1)
-        shelfs = padded_shelfs[min_y:max_y, min_x:max_x].reshape(-1)
-        pickers = padded_pickers[min_y:max_y, min_x:max_x].reshape(-1)
- 
-        # write dictionary observations
-        obs = {}
-        if self.normalised_coordinates:
-            agent_x = agent.x / (self.grid_size[1] - 1)
-            agent_y = agent.y / (self.grid_size[0] - 1)
-        else:
-            agent_x = agent.x
-            agent_y = agent.y
-        # --- self data
-        obs["self"] = {
-            "location": np.array([agent_x, agent_y]),
-            "carrying_shelf": [int(agent.carrying_shelf is not None)],
-            "direction": agent.dir.value,
-            "on_highway": [int(self._is_highway(agent.x, agent.y))],
-        }
-        # --- sensor data
-        obs["sensors"] = tuple({} for _ in range(self._obs_sensor_locations))
-
-        # find neighboring agents
-        for i, id_ in enumerate(agents):
-            if id_ == 0:
-                obs["sensors"][i]["has_agent"] = [0]
-                obs["sensors"][i]["direction"] = 0
-                obs["sensors"][i]["local_message"] = self.msg_bits * [0]
-            else:
-                obs["sensors"][i]["has_agent"] = [1]
-                obs["sensors"][i]["direction"] = self.agents_list[id_ - 1].dir.value
-                obs["sensors"][i]["local_message"] = self.agents_list[id_ - 1].message
-        # find neighboring pickers
-        for i, id_ in enumerate(pickers):
-            if id_ == 0:
-                obs["sensors"][i]["has_picker"] = [0]
-                obs["sensors"][i]["direction_picker"] = 0
-                obs["sensors"][i]["local_message_picker"] = self.msg_bits * [0]
-            else:
-                obs["sensors"][i]["has_picker"] = [1]
-                obs["sensors"][i]["direction_picker"] = self.agents_list[id_ - 1].dir.value
-                obs["sensors"][i]["local_message_picker"] = self.agents_list[id_ - 1].message
-        # find neighboring shelfs:
-        for i, id_ in enumerate(shelfs):
-            if id_ == 0:
-                obs["sensors"][i]["has_shelf"] = [0]
-                obs["sensors"][i]["shelf_requested"] = [0]
-            else:
-                obs["sensors"][i]["has_shelf"] = [1]
-                obs["sensors"][i]["shelf_requested"] = [
-                    int(self.shelfs[id_ - 1] in self.request_queue)
-                ]
-
-        return obs
     
     def find_path(self, start, goal, agent, care_for_agents = True):
         grid = np.zeros(self.grid_size)
@@ -864,10 +659,9 @@ class Warehouse(ParallelEnv):
     
     def get_picker_action_mask(self):
         noop_mask = [True]
-        goal_mask = [False] * len(self.goals)
         item_mask = [(i in self.agv_targets) and (i not in self.picker_targets) for i in range(len(self.item_loc_dict) - len(self.goals))]
 
-        return np.array(noop_mask + goal_mask + item_mask, dtype=bool)
+        return np.array(noop_mask + item_mask, dtype=bool)
 
     def get_agv_action_mask(self, agent: Agent):
         agent_is_carrying = (agent.carrying_shelf is not None)
@@ -1052,6 +846,8 @@ class Warehouse(ParallelEnv):
                 # continue
             if not agent.busy:
                 if macro_action != 0:
+                    if agent.type == AgentType.PICKER:
+                        macro_action = macro_action + len(self.goals)
                     agent.path = self.find_path((agent.y, agent.x), self.item_loc_dict[macro_action], agent, care_for_agents=False)
                     # If not path was found refuse location
                     if agent.path == []:
@@ -1084,7 +880,10 @@ class Warehouse(ParallelEnv):
                             self.stuck_count[agent.id - 1] = [0, (agent.x, agent.y)]
 
         #  agents that can_carry should not collide
-        clashes_count = self.resolve_move_conflict(self.agents_list)
+        if self.agents_can_clash:
+            clashes_count = self.resolve_move_conflict(self.agents_list)
+        else:
+            clashes_count = 0
 
         # Restart agents if they are stuck at the same position
         # This can happen when their goal is occupied after reaching their last step/re-calculating a path
@@ -1153,6 +952,7 @@ class Warehouse(ParallelEnv):
                                 rewards += 0.5
                             elif self.reward_type == RewardType.INDIVIDUAL:
                                 rewards[picker_id - 1] += 0.1
+                                # rewards[agent.id - 1] += 0.5 #NOTE: added by Bram to provide reward for AGVs that pickup a shelf
                     elif agent.type == AgentType.AGENT:
                         agent.carrying_shelf = self.shelfs[shelf_id - 1]
                         agent.busy = False
@@ -1246,6 +1046,7 @@ class Warehouse(ParallelEnv):
             episode_done = False
 
         
+        #NOTE: Why count TOGGLE_LOAD?
         agvs_idle_time = sum([int(agent.req_action in (Action.NOOP, Action.TOGGLE_LOAD)) for agent in self.agents_list[:self.n_agvs]])
         pickers_idle_time = sum([int(agent.req_action in (Action.NOOP, Action.TOGGLE_LOAD)) for agent in self.agents_list[self.n_agvs:]])
 
