@@ -1110,12 +1110,12 @@ class Warehouse(ParallelEnv):
 
         return observations, rewards, terminateds, truncateds, infos
 
-    def render(self, mode="human"):
+    def render(self):
         if not self.renderer:
             from tarware.rendering import Viewer
 
             self.renderer = Viewer(self.grid_size)
-        return self.renderer.render(self, return_rgb_array=(mode=="rgb_array"))
+        return self.renderer.render(self, return_rgb_array=(self.render_mode=="rgb_array"))
 
     def close(self):
         if self.renderer:

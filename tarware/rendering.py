@@ -18,7 +18,6 @@ if "Apple" in sys.version:
         os.environ["DYLD_FALLBACK_LIBRARY_PATH"] += ":/usr/lib"
         # (JDS 2016/04/15): avoid bug on Anaconda 2.3.0 / Yosemite
 
-
 try:
     import pyglet
 except ImportError as e:
@@ -32,7 +31,7 @@ except ImportError as e:
     )
 
 try:
-    from pyglet.gl import *
+    from pyglet.gl import gl
 except ImportError as e:
     raise ImportError(
         """
@@ -105,8 +104,8 @@ class Viewer(object):
         self.window.on_close = self.window_closed_by_user
         self.isopen = True
 
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
 
     def close(self):
         self.window.close()
@@ -115,16 +114,9 @@ class Viewer(object):
         self.isopen = False
         exit()
 
-    def set_bounds(self, left, right, bottom, top):
-        assert right > left and top > bottom
-        scalex = self.width / (right - left)
-        scaley = self.height / (top - bottom)
-        self.transform = Transform(
-            translation=(-left * scalex, -bottom * scaley), scale=(scalex, scaley)
-        )
 
     def render(self, env, return_rgb_array=False):
-        glClearColor(*_BACKGROUND_COLOR, 0)
+        gl.glClearColor(*_BACKGROUND_COLOR, 0)
         self.window.clear()
         self.window.switch_to()
         self.window.dispatch_events()
@@ -281,8 +273,8 @@ class Viewer(object):
 
             draw_color = _AGENT_LOADED_COLOR if agent.carrying_shelf else _AGENT_COLOR
 
-            glColor3ub(*draw_color)
-            circle.draw(GL_POLYGON)
+            gl.glColor3ub(*draw_color)
+            circle.draw(gl.GL_POLYGON)
 
         for agent in env.agents_list:
 
@@ -306,19 +298,19 @@ class Viewer(object):
                         + self.grid_size // 2
                         + 1
                         + (
-                            radius if agent.dir.value == Direction.RIGHT.value else 0
+                            radius if agent.dir == Direction.RIGHT.value else 0
                         )  # DIR X
                         + (
-                            -radius if agent.dir.value == Direction.LEFT.value else 0
+                            -radius if agent.dir == Direction.LEFT.value else 0
                         ),  # DIR X
                         (self.grid_size + 1) * row
                         + self.grid_size // 2
                         + 1
                         + (
-                            radius if agent.dir.value == Direction.UP.value else 0
+                            radius if agent.dir == Direction.UP.value else 0
                         )  # DIR Y
                         + (
-                            -radius if agent.dir.value == Direction.DOWN.value else 0
+                            -radius if agent.dir == Direction.DOWN.value else 0
                         ),  # DIR Y
                     ),
                 ),
@@ -341,10 +333,10 @@ class Viewer(object):
             y = radius * math.sin(angle) + badge_y
             verts += [x, y]
         circle = pyglet.graphics.vertex_list(resolution, ("v2f", verts))
-        glColor3ub(*_BLACK)
-        circle.draw(GL_POLYGON)
-        glColor3ub(*_WHITE)
-        circle.draw(GL_LINE_LOOP)
+        gl.glColor3ub(*_BLACK)
+        circle.draw(gl.GL_POLYGON)
+        gl.glColor3ub(*_WHITE)
+        circle.draw(gl.GL_LINE_LOOP)
         label = pyglet.text.Label(
             str(level),
             font_name="Times New Roman",
