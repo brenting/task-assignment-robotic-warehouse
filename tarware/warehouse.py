@@ -834,6 +834,8 @@ class Warehouse(ParallelEnv):
         self, macro_actions: dict[str, Action]
     ) -> tuple[dict[str, Any], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]:
         # Logic for Macro Actions
+        selected_actions = defaultdict(set)
+        duplicate_action_count = defaultdict(int)
         for agent_id in self.agents:
             #NOTE: hacky way to select noop if action not present, needs something better
             macro_action = macro_actions.get(agent_id, 0)
@@ -848,6 +850,11 @@ class Warehouse(ParallelEnv):
                 if macro_action != 0:
                     if agent.type == AgentType.PICKER:
                         macro_action = macro_action + len(self.goals)
+
+                    if macro_action in selected_actions[agent.type]:
+                        duplicate_action_count[agent.type] += 1
+                    selected_actions[agent.type].add(macro_action)
+
                     agent.path = self.find_path((agent.y, agent.x), self.item_loc_dict[macro_action], agent, care_for_agents=False)
                     # If not path was found refuse location
                     if agent.path == []:
@@ -1062,6 +1069,8 @@ class Warehouse(ParallelEnv):
             "pickers_distance_travelled": pickers_distance_travelled,
             "agvs_idle_time": agvs_idle_time,
             "pickers_idle_time": pickers_idle_time,
+            "agvs_duplicate_shelf_actions": duplicate_action_count[AgentType.AGV],
+            "pickers_duplicate_shelf_actions": duplicate_action_count[AgentType.PICKER],
         })
     
         # Construct return values
