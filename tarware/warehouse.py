@@ -178,10 +178,9 @@ class Warehouse(ParallelEnv):
         observation_type: str = "flattened",
         normalised_coordinates: bool = False,
         render_mode: str | None = None,
-        action_masking: bool = False,
+        action_masking_level: int = 2,
         sample_collection: str = "all",
         targets_vam: bool = True,
-        improved_masking: bool = True,
         agents_can_clash: bool = True,
     ):
         """The robotic warehouse environment
@@ -250,12 +249,11 @@ class Warehouse(ParallelEnv):
         :type normalised_coordinates: bool
         """
         self.render_mode = render_mode
-        self.action_masking = action_masking
+        self.action_masking_level = action_masking_level
         self.sample_collection = sample_collection
         self.targets_vam = targets_vam
 
         self.observation_type = observation_type
-        self.improved_masking = improved_masking
         self.agents_can_clash = agents_can_clash
 
 
@@ -335,7 +333,7 @@ class Warehouse(ParallelEnv):
             raise NotImplementedError(f"Observation space for {self.observation_type} type not defined")
 
         obs_space = {"observation": sa_observation_space}
-        if self.action_masking:
+        if self.action_masking_level:
             obs_space["action_mask"] = spaces.Box(0, 1, (self.action_space(agent).n,), dtype=bool)
         if self.sample_collection == "masking":
             obs_space["sample_mask"] = spaces.Box(0, 1, (1,), dtype=bool)
@@ -500,7 +498,7 @@ class Warehouse(ParallelEnv):
         obs = {"observation": obs}
         if self.sample_collection == "masking":
             obs["sample_mask"] = not agent.busy
-        if self.action_masking:
+        if self.action_masking_level:
             obs["action_mask"] = self.get_action_mask(agent)
 
         return obs
@@ -659,7 +657,11 @@ class Warehouse(ParallelEnv):
     
     def get_picker_action_mask(self):
         noop_mask = [True]
-        item_mask = [(i in self.agv_targets) and (i not in self.picker_targets) for i in range(len(self.item_loc_dict) - len(self.goals))]
+
+        if self.action_masking_level > 1:
+            item_mask = [(i in self.agv_targets) and (i not in self.picker_targets) for i in range(len(self.item_loc_dict) - len(self.goals))]
+        elif self.action_masking_level == 1:
+            item_mask = [(i in self.agv_targets) for i in range(len(self.item_loc_dict) - len(self.goals))]
 
         return np.array(noop_mask + item_mask, dtype=bool)
 
@@ -669,7 +671,7 @@ class Warehouse(ParallelEnv):
 
         noop_mask = [True]
 
-        if self.improved_masking:
+        if self.action_masking_level == 3:
             goal_mask = [agent.to_deliver] * len(self.goals)
             if agent.to_deliver:
                 item_mask = [False] * len(self.requested_items_list)
@@ -677,9 +679,13 @@ class Warehouse(ParallelEnv):
                 item_mask = [empty and (i not in self.agv_targets) for i, empty in enumerate(self.empty_items_list)]
             else:
                 item_mask = [requested and (i not in self.agv_targets) for i, requested in enumerate(self.requested_items_list)]
-        else:
+        elif self.action_masking_level == 2:
             goal_mask = [agent_is_carrying] * len(self.goals)
             item_mask = [(empty if agent_is_carrying else requested) and (i not in self.agv_targets) for i, (empty, requested) in enumerate(zip(self.empty_items_list, self.requested_items_list))]
+        elif self.action_masking_level == 1:
+            goal_mask = [agent_is_carrying] * len(self.goals)
+            item_mask = [(empty if agent_is_carrying else requested) for empty, requested in zip(self.empty_items_list, self.requested_items_list)]
+
 
         return np.array(noop_mask + goal_mask + item_mask, dtype=bool)
 
