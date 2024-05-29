@@ -333,7 +333,7 @@ class Warehouse(ParallelEnv):
             raise NotImplementedError(f"Observation space for {self.observation_type} type not defined")
 
         obs_space = {"observation": sa_observation_space}
-        if self.action_masking_level:
+        if self.action_masking_level > 0:
             obs_space["action_mask"] = spaces.Box(0, 1, (self.action_space(agent).n,), dtype=bool)
         if self.sample_collection == "masking":
             obs_space["sample_mask"] = spaces.Box(0, 1, (1,), dtype=bool)
@@ -498,7 +498,7 @@ class Warehouse(ParallelEnv):
         obs = {"observation": obs}
         if self.sample_collection == "masking":
             obs["sample_mask"] = not agent.busy
-        if self.action_masking_level:
+        if self.action_masking_level > 0:
             obs["action_mask"] = self.get_action_mask(agent)
 
         return obs
